@@ -5,6 +5,114 @@ from sympy.abc import x, y
 from qldpc import codes, circuits
 from qldpc.objects import Pauli
 import numpy as np
+import math
+import matplotlib.pyplot as plt
+
+
+def deform_code_for_logical(H, basis, logical):
+    logical_qubits_index = np.where(logical == 1)[0]
+    n_data = logical.shape[0]
+    qubit_to_vertex = {int(q): i for i, q in enumerate(logical_qubits_index)}
+    vertex_to_qubit = {i: int(q) for i, q in enumerate(logical_qubits_index)}
+    n_vertices = len(logical_qubits_index)
+    g = ig.Graph(n_vertices, edges=[])
+
+    if basis == Pauli.Z:
+        H_basis_all = H[:, n_data:]
+        H_opposite_basis_all = H[:, :n_data]
+    else:
+        H_basis_all = H[:, :n_data]
+        H_opposite_basis_all = H[:, n_data:]
+
+    edge_set = set()
+    
+    for check in H_opposite_basis_all:
+        overlap = np.where((logical == 1) & (check == 1))[0]
+        if len(overlap)>0 and len(overlap)%2==0:
+            n_pairs = len(overlap) // 2
+            for i in range(n_pairs):
+                v1 = qubit_to_vertex[int(overlap[2*i])]
+                v2 = qubit_to_vertex[int(overlap[2*i+1])]
+                edge_set.add(normalize_edge(v1, v2))
+
+    if edge_set:
+        g.add_edges(list(edge_set))
+
+
+    comps = g.components()
+    if len(comps) > 1:
+        reps = [comp[0] for comp in comps]
+        for i in range(len(reps) - 1):
+            e = normalize_edge(reps[i], reps[i + 1])
+            if not g.are_adjacent(*e):
+                g.add_edge(*e)
+    #print_degree_stats(g, "after adding edges")
+
+    H_basis_nonzero = H_basis_all[np.any(H_basis_all, axis=1)]
+    max_cycle_weight = int(np.max(np.sum(H_basis_nonzero, axis=1))) if len(H_basis_nonzero) else 4
+    max_cycle_weight = max(max_cycle_weight, 3)
+
+    cycles_edges = find_short_cycle_basis(
+        [tuple(map(int, e)) for e in g.get_edgelist()],
+        return_edges=True,
+    )
+    #print_degree_stats(g, "Before splitting cycles")
+    cycles_edges = split_heavy_cycles(
+        cycles_edges=cycles_edges,
+        max_cycle_weight=max_cycle_weight,
+        g=g,
+    )
+    #print_degree_stats(g, "After splitting cycles")
+    final_edgelist = [normalize_edge(*e) for e in g.get_edgelist()]
+    edge_to_eid = {e: eid for eid, e in enumerate(final_edgelist)}
+
+    n_edges = len(final_edgelist)
+    n_qubits = n_data + n_edges
+
+    H_opposite_basis_new = np.zeros((len(cycles_edges), n_qubits), dtype=np.uint8)
+    for i, cyc in enumerate(cycles_edges):
+        for e in cyc:
+            eid = edge_to_eid[normalize_edge(*e)]
+            H_opposite_basis_new[i, n_data + eid] ^= 1
+
+    H_basis_new = np.zeros((n_vertices, n_qubits), dtype=np.uint8)
+    for v in range(n_vertices):
+        H_basis_new[v, vertex_to_qubit[v]] = 1
+        for eid in g.incident(v):
+            H_basis_new[v, n_data + eid] ^= 1
+
+    H_basis_old = H_basis_all[np.any(H_basis_all, axis=1)]
+    H_basis_old_padded = np.pad(H_basis_old, ((0, 0), (0, n_edges)), mode="constant").astype(np.uint8)
+
+    H_opposite_basis_old_padded = deform_old_opposite_basis_checks_with_graph_edges(
+        g=g,
+        H_opposite_basis_all=H_opposite_basis_all,
+        logical_qubits=logical,
+        logical_qubits_index=logical_qubits_index,
+        n_data=n_data,
+    )
+
+    H_opposite_basis_def = np.vstack([H_opposite_basis_old_padded, H_opposite_basis_new]) % 2
+    H_basis_def = np.vstack([H_basis_old_padded, H_basis_new]) % 2
+
+    res = {
+        "n_qubits" : n_qubits,
+        "n_original_qubits" : n_data,
+        "n_edges" : n_edges,
+        "H_basis_def" : H_basis_def,
+        "H_opposite_basis_def" : H_opposite_basis_def,
+        "H_basis_new" : H_basis_new,
+        "H_basis_old" : H_basis_old_padded,
+        "H_opposite_basis_new" : H_opposite_basis_new,
+        "H_opposite_basis_old_padded" : H_opposite_basis_old_padded,
+        "g" : g,
+        "logical" : logical,
+        "qubit_to_vertex": qubit_to_vertex
+    }
+    
+    return res
+
+
 
 def deform_old_x_checks_with_graph_edges(
     g,
@@ -287,154 +395,272 @@ def normalize_edge(u, v):
     return (u, v) if u < v else (v, u)
 
 
-def order_cycle_edges(cycle):
-    if len(cycle) == 0:
-        return []
-
-    edges = [normalize_edge(*e) for e in cycle]
-    nbrs = defaultdict(list)
-    for u, v in edges:
-        nbrs[u].append(v)
-        nbrs[v].append(u)
-
-    bad = {v: ns for v, ns in nbrs.items() if len(ns) != 2}
-    if bad:
-        raise ValueError(f"Not a simple cycle; cycle-vertex degrees are {bad}")
-
-    start = min(nbrs.keys())
-    prev = None
-    curr = start
-    ordered_vertices = [start]
-
-    while True:
-        a, b = nbrs[curr]
-        nxt = a if a != prev else b
-
-        if nxt == start:
-            break
-
-        ordered_vertices.append(nxt)
-        prev, curr = curr, nxt
-
-        if len(ordered_vertices) > len(edges):
-            raise ValueError(f"Failed to order cycle consistently: {cycle}")
-
-    return [
-        (ordered_vertices[i], ordered_vertices[(i + 1) % len(ordered_vertices)])
-        for i in range(len(ordered_vertices))
-    ]
-
-
-def cycle_vertices(cycle):
-    if len(cycle) == 0:
-        return []
-
-    verts = [cycle[0][0]]
-    for u, v in cycle:
-        if u != verts[-1]:
-            raise ValueError(f"Cycle is not ordered consistently: {cycle}")
-        verts.append(v)
-
-    if verts[-1] != verts[0]:
-        raise ValueError(f"Cycle does not close: {cycle}")
-
-    return verts[:-1]
-
-
-def path_edges(path_vertices):
-    return [
-        normalize_edge(path_vertices[i], path_vertices[i + 1])
-        for i in range(len(path_vertices) - 1)
-    ]
-
-
-def split_cycle_in_center(cycle):
-    ordered_cycle = order_cycle_edges(cycle)
-    verts = cycle_vertices(ordered_cycle)
-    n = len(verts)
-
-    if n < 4:
-        raise ValueError(f"Cannot split a cycle with fewer than 4 vertices: {cycle}")
-
-    i = 0
-    j = n // 2
-    e = normalize_edge(verts[i], verts[j])
-
-    path1_verts = verts[i:j + 1]
-    path2_verts = verts[j:] + [verts[0]]
-
-    cycle1 = path_edges(path1_verts) + [e]
-    cycle2 = path_edges(path2_verts) + [e]
-
-    return e, [cycle1, cycle2]
-
+def print_degree_stats(g, label):
+    degs = g.degree()
+    print(f"{label}: max degree = {max(degs) if degs else 0}")
+    hist = defaultdict(int)
+    for d in degs:
+        hist[d] += 1
+    print(f"{label}: degree histogram = {dict(sorted(hist.items()))}")
 
 def split_heavy_cycles(cycles_edges, max_cycle_weight, g):
+    """
+    Split cycles until every cycle has <= max_cycle_weight edges.
+
+    Strategy:
+      - Ignore balance.
+      - At each step, choose the chord whose endpoints have the smallest
+        post-split vertex-degree cost.
+      - Keep splitting recursively until all child cycles are short enough.
+
+    """
+
+    from collections import defaultdict
+
+    def cycle_vertices_from_edges(cyc):
+        """
+        Recover an ordered vertex cycle from an unordered simple cycle edge list.
+        Returns [v0, v1, ..., v_{k-1}] with wraparound implicit.
+        """
+        if not cyc:
+            return []
+
+        cyc = [normalize_edge(*e) for e in cyc]
+
+        adj = defaultdict(list)
+        for a, b in cyc:
+            adj[a].append(b)
+            adj[b].append(a)
+
+        bad = [v for v, nbrs in adj.items() if len(nbrs) != 2]
+        if bad:
+            raise ValueError(f"Edge set is not a simple cycle. Bad vertices: {bad}, cycle: {cyc}")
+
+        start = cyc[0][0]
+        ordered = [start]
+        prev = None
+        curr = start
+
+        while True:
+            nbrs = adj[curr]
+            if prev is None:
+                nxt = nbrs[0]
+            else:
+                nxt = nbrs[0] if nbrs[1] == prev else nbrs[1]
+
+            if nxt == start:
+                break
+
+            ordered.append(nxt)
+            prev, curr = curr, nxt
+
+            if len(ordered) > len(cyc):
+                raise ValueError(f"Failed to reconstruct cycle ordering for cycle: {cyc}")
+
+        return ordered
+
+    def choose_min_degree_chord(cyc, g):
+        """
+        Choose a chord that minimizes endpoint degree growth, subject to actually
+        splitting the cycle into two strictly smaller cycles.
+        """
+        verts = cycle_vertices_from_edges(cyc)
+        k = len(verts)
+
+        if k < 4:
+            raise ValueError("Cannot split a cycle of length < 4")
+
+        best = None
+        best_score = None
+
+        for i in range(k):
+            for j in range(i + 2, k):
+                # skip wraparound adjacency
+                if i == 0 and j == k - 1:
+                    continue
+
+                a = verts[i]
+                b = verts[j]
+                chord = normalize_edge(a, b)
+
+                arc1_len = j - i
+                arc2_len = k - arc1_len
+
+                # resulting cycles include the chord
+                c1_len = arc1_len + 1
+                c2_len = arc2_len + 1
+
+                # both children must be strictly smaller
+                if c1_len >= k or c2_len >= k:
+                    continue
+
+                adds_new_edge = not g.are_adjacent(*chord)
+                deg_a_after = g.degree(a) + (1 if adds_new_edge else 0)
+                deg_b_after = g.degree(b) + (1 if adds_new_edge else 0)
+
+                # purely degree-driven score
+                score = (
+                    max(deg_a_after, deg_b_after),   # minimize worst endpoint degree
+                    deg_a_after + deg_b_after,       # then total endpoint degree
+                    0 if adds_new_edge else -1,      # slight preference for existing chord
+                    c1_len + c2_len,                 # tie-breaker
+                    i, j,
+                )
+
+                if best_score is None or score < best_score:
+                    best_score = score
+                    best = (i, j, chord)
+
+        if best is None:
+            raise ValueError(f"Could not find a valid chord split for cycle {cyc}")
+
+        return best
+
+    def split_once(cyc, g):
+        """
+        Split one cycle using the minimum-degree chord.
+        Returns two child cycles.
+        """
+        verts = cycle_vertices_from_edges(cyc)
+        i, j, chord = choose_min_degree_chord(cyc, g)
+
+        if not g.are_adjacent(*chord):
+            g.add_edge(*chord)
+
+        arc1 = verts[i:j + 1]
+        arc2 = verts[j:] + verts[:i + 1]
+
+        c1 = [normalize_edge(arc1[t], arc1[t + 1]) for t in range(len(arc1) - 1)] + [chord]
+        c2 = [normalize_edge(arc2[t], arc2[t + 1]) for t in range(len(arc2) - 1)] + [chord]
+
+        return c1, c2
+
     pending = [[normalize_edge(*e) for e in cyc] for cyc in cycles_edges]
     final_cycles = []
 
-    while pending:
-        cyc = pending.pop(0)
+    # safety cap
+    max_splits = 50 * max(1, len(cycles_edges))
+    split_count = 0
 
-        if len(cyc) > max_cycle_weight:
-            e, (c1, c2) = split_cycle_in_center(cyc)
-            if not g.are_adjacent(*e):
-                g.add_edge(*e)
+    while pending:
+        cyc = pending.pop()
+
+        if len(cyc) <= max_cycle_weight:
+            final_cycles.append(cyc)
+            continue
+
+        if split_count >= max_splits:
+            # stop gracefully if something pathological happens
+            final_cycles.append(cyc)
+            continue
+
+        try:
+            c1, c2 = split_once(cyc, g)
+        except ValueError:
+            final_cycles.append(cyc)
+            continue
+
+        # Only accept the split if both children are strictly smaller
+        if len(c1) < len(cyc) and len(c2) < len(cyc):
             pending.append(c1)
             pending.append(c2)
+            split_count += 1
         else:
-            final_cycles.append([normalize_edge(*e) for e in cyc])
+            final_cycles.append(cyc)
 
     return final_cycles
 
 
-def shortest_path_edges(g, src, dst):
-    vpath = g.get_shortest_paths(src, to=dst, mode="ALL", output="vpath")[0]
-    if len(vpath) < 2:
-        if src == dst:
-            return []
-        raise ValueError(f"No path between {src} and {dst}")
+from collections import deque
+import numpy as np
+
+
+def shortest_path_edge_list(g, src, dst):
+    """
+    Return one shortest path from src to dst as a list of normalized edges.
+    Returns [] if src == dst.
+    Raises ValueError if no path exists.
+    """
+    if src == dst:
+        return []
+
+    vpath = g.get_shortest_paths(src, to=dst, output="vpath")[0]
+    if vpath is None or len(vpath) == 0:
+        raise ValueError(f"No path found between vertices {src} and {dst}")
+
     return [normalize_edge(vpath[i], vpath[i + 1]) for i in range(len(vpath) - 1)]
 
 
-def greedy_pairing_path_union(g, vertices):
+def greedy_pairing_path_union(g, overlap_vertices):
     """
-    Path-pairing for an even set of vertices.
-    Returns the GF(2) union of shortest paths.
-    """
-    verts = sorted(map(int, vertices))
-    if len(verts) % 2 != 0:
-        raise ValueError(f"Expected even overlap, got {verts}")
+    Given an even-size list of graph vertices, greedily pair them by shortest-path
+    distance and return the union of edges on those pairing paths.
 
-    remaining = set(verts)
-    chosen_edges = set()
+    Parameters
+    ----------
+    g : igraph.Graph
+    overlap_vertices : list[int]
+        Vertices to pair. Must have even length.
+
+    Returns
+    -------
+    list[tuple[int, int]]
+        Sorted list of normalized edges appearing in the union of the chosen paths.
+    """
+    overlap_vertices = [int(v) for v in overlap_vertices]
+
+    if len(overlap_vertices) % 2 != 0:
+        raise ValueError(
+            f"greedy_pairing_path_union requires an even number of vertices, got {len(overlap_vertices)}"
+        )
+
+    if len(overlap_vertices) == 0:
+        return []
+
+    # Precompute pairwise shortest-path lengths on just the relevant vertices
+    # distances[i][j] corresponds to overlap_vertices[i] -> overlap_vertices[j]
+    distances = g.distances(source=overlap_vertices, target=overlap_vertices)
+
+    remaining = set(range(len(overlap_vertices)))
+    used_edges = set()
 
     while remaining:
-        u = min(remaining)
+        i = min(remaining)
 
-        best_v = None
-        best_dist = None
-        for v in remaining:
-            if v == u:
+        # Choose nearest remaining partner j for i
+        best_j = None
+        best_score = None
+        vi = overlap_vertices[i]
+
+        for j in remaining:
+            if j == i:
                 continue
-            d = g.distances(u, v)[0][0]
-            if d == float("inf"):
-                raise ValueError(f"No path between {u} and {v}")
-            if best_dist is None or d < best_dist or (d == best_dist and v < best_v):
-                best_dist = d
-                best_v = v
 
-        for e in shortest_path_edges(g, u, best_v):
-            if e in chosen_edges:
-                chosen_edges.remove(e)
-            else:
-                chosen_edges.add(e)
+            vj = overlap_vertices[j]
+            dij = distances[i][j]
 
-        remaining.remove(u)
-        remaining.remove(best_v)
+            if dij is None or np.isinf(dij):
+                continue
 
-    return sorted(chosen_edges)
+            # tie-break by vertex label for determinism
+            score = (dij, min(vi, vj), max(vi, vj))
+            if best_score is None or score < best_score:
+                best_score = score
+                best_j = j
 
+        if best_j is None:
+            raise ValueError(
+                f"Could not find a path to pair vertex {vi} with any remaining vertex."
+            )
+
+        vj = overlap_vertices[best_j]
+        path_edges = shortest_path_edge_list(g, vi, vj)
+        used_edges.update(path_edges)
+
+        remaining.remove(i)
+        remaining.remove(best_j)
+
+    return sorted(used_edges)
 
 def deform_old_opposite_basis_checks_with_graph_edges(
     g,
@@ -476,3 +702,253 @@ def deform_old_opposite_basis_checks_with_graph_edges(
             H_old_padded[row_idx, n_data + eid] ^= 1
 
     return H_old_padded
+
+def normalize_edge(u, v):
+    u, v = int(u), int(v)
+    return (u, v) if u <= v else (v, u)
+
+def plot_deformation_surgery_view(
+    H,
+    basis,
+    logical,
+    deform_fn=deform_code_for_logical,
+    n_cols=None,
+    aux_layout="kk",
+    figsize=(16, 8),
+    label_aux=True,
+    ):
+    import numpy as np
+    import matplotlib.pyplot as plt
+    import matplotlib.patches as patches
+
+    out = deform_fn(H, basis, logical)
+    n_data = out["n_original_qubits"]
+    g = out["g"]
+
+    logical_idx = np.where(logical == 1)[0]
+    qubit_to_vertex = {int(q): i for i, q in enumerate(logical_idx)}
+
+    if n_cols is None:
+        n_cols = int(np.ceil(np.sqrt(n_data)))
+
+    n_rows = int(np.ceil(n_data / n_cols))
+
+    data_pos = {}
+    for q in range(n_data):
+        r, c = divmod(q, n_cols)
+        data_pos[q] = (c, -r)
+
+    aux_x0 = n_cols + 4.0
+    aux_w = max(5.0, n_cols * 0.55)
+    aux_h = max(5.0, n_rows * 0.85)
+
+    layout = g.layout(aux_layout)
+    xs = np.array([p[0] for p in layout])
+    ys = np.array([p[1] for p in layout])
+
+    xs = (xs - xs.min()) / (xs.max() - xs.min() + 1e-12)
+    ys = (ys - ys.min()) / (ys.max() - ys.min() + 1e-12)
+
+    aux_pos = {
+        v: (
+            aux_x0 + 0.6 + xs[v] * (aux_w - 1.2),
+            -0.6 - ys[v] * (aux_h - 1.2),
+        )
+        for v in range(g.vcount())
+    }
+
+    fig, ax = plt.subplots(figsize=figsize)
+    ax.set_aspect("equal")
+    ax.axis("off")
+
+    # data-qubit patch, aligned around all plotted qubit centers
+    pad = 0.75
+    patch = patches.Rectangle(
+        (-pad, -(n_rows - 1) - pad),
+        (n_cols - 1) + 2 * pad,
+        (n_rows - 1) + 2 * pad,
+        fill=False,
+        linewidth=2,
+        edgecolor="black",
+    )
+    ax.add_patch(patch)
+
+    for q, (x, y) in data_pos.items():
+        is_logical = logical[q] == 1
+        ax.scatter(
+            x,
+            y,
+            s=170 if is_logical else 95,
+            facecolors="lightgray" if is_logical else "white",
+            edgecolors="black" if is_logical else "0.6",
+            linewidths=2 if is_logical else 1.4,
+            zorder=3,
+        )
+
+    # auxiliary graph background
+    aux_bg = patches.Rectangle(
+        (aux_x0, -aux_h),
+        aux_w,
+        aux_h,
+        facecolor="0.93",
+        edgecolor="none",
+        zorder=0,
+    )
+    ax.add_patch(aux_bg)
+
+    # auxiliary graph edges
+    for u, v in g.get_edgelist():
+        x1, y1 = aux_pos[u]
+        x2, y2 = aux_pos[v]
+        ax.plot([x1, x2], [y1, y2], color="black", linewidth=2.4, zorder=2)
+
+    # dashed mapping lines from logical data qubits to graph vertices
+    for q in logical_idx:
+        v = qubit_to_vertex[int(q)]
+        x1, y1 = data_pos[int(q)]
+        x2, y2 = aux_pos[v]
+        ax.plot([x1, x2], [y1, y2], "--", color="0.55", linewidth=1.2, alpha=0.75, zorder=1)
+
+    # auxiliary graph vertices
+    for v in range(g.vcount()):
+        x, y = aux_pos[v]
+        ax.scatter(
+            x,
+            y,
+            s=210,
+            marker="s",
+            facecolors="white",
+            edgecolors="black",
+            linewidths=1.7,
+            zorder=4,
+        )
+        if label_aux:
+            ax.text(x, y, str(v), ha="center", va="center", fontsize=9, zorder=5)
+
+    ax.set_title(f"Auxiliary-graph surgery view for logical {basis}", fontsize=18)
+    ax.text(aux_x0 + aux_w / 2, 0.75, "auxiliary graph", ha="center", fontsize=14)
+    ax.text((n_cols - 1) / 2, pad + 0.45, "data-qubit patch", ha="center", fontsize=14)
+
+    ax.set_xlim(-1.2, aux_x0 + aux_w + 0.8)
+    ax.set_ylim(-max(n_rows, aux_h) - 0.8, 1.4)
+
+    plt.tight_layout()
+    return fig, ax, out
+
+
+
+def skiptree(g, root=0):
+    """
+    SkipTreeHR for an igraph.Graph.
+
+    Args:
+        g: igraph.Graph, undirected and connected
+        root: root vertex index
+
+    Returns:
+        T_rows: list[set[int]]
+            T row l is the set of original igraph edge IDs on the tree path
+            from SkipTree label l to label l+1. Shape: (n-1) x m.
+        P: list[int]
+            P[v] = SkipTree label of original vertex v.
+        label_to_vertex: list[int]
+            label_to_vertex[l] = original vertex with SkipTree label l.
+        tree_edge_ids: list[int]
+            igraph edge IDs used in the spanning tree.
+    """
+    if g.is_directed():
+        raise ValueError("g must be undirected.")
+    if not g.is_connected():
+        raise ValueError("g must be connected.")
+
+    n = g.vcount()
+    m = g.ecount()
+
+    if not (0 <= root < n):
+        raise ValueError("root must be a valid vertex index.")
+
+    # Build adjacency: vertex -> [(neighbor, edge_id), ...]
+    adj = [[] for _ in range(n)]
+    for eid, edge in enumerate(g.es):
+        u, v = edge.tuple
+        adj[u].append((v, eid))
+        adj[v].append((u, eid))
+
+    # BFS spanning tree
+    parent = [-1] * n
+    parent_edge = [-1] * n
+    children = [[] for _ in range(n)]
+    seen = [False] * n
+
+    q = deque([root])
+    seen[root] = True
+
+    while q:
+        v = q.popleft()
+        for w, eid in adj[v]:
+            if not seen[w]:
+                seen[w] = True
+                parent[w] = v
+                parent_edge[w] = eid
+                children[v].append(w)
+                q.append(w)
+
+    label_to_vertex = []
+    vertex_to_label = [-1] * n
+
+    def label_vertex(v):
+        label = len(label_to_vertex)
+        label_to_vertex.append(v)
+        vertex_to_label[v] = label
+
+    def label_first(v, skip=False):
+        label_vertex(v)
+
+        for idx, child in enumerate(children[v]):
+            is_youngest = idx == len(children[v]) - 1
+
+            if is_youngest and not skip:
+                label_first(child, skip=False)
+            else:
+                label_last(child)
+
+    def label_last(v):
+        for child in children[v]:
+            label_first(child, skip=True)
+
+        label_vertex(v)
+
+    label_first(root, skip=False)
+
+    # P[v] = SkipTree label of original vertex v
+    P = vertex_to_label
+
+    def tree_path_edges(a, b):
+        path_a = []
+        path_b = []
+        ancestors_a = {}
+
+        x = a
+        while x != -1:
+            ancestors_a[x] = len(path_a)
+            if parent[x] != -1:
+                path_a.append(parent_edge[x])
+            x = parent[x]
+
+        y = b
+        while y not in ancestors_a:
+            path_b.append(parent_edge[y])
+            y = parent[y]
+
+        lca = y
+        return path_a[:ancestors_a[lca]] + path_b
+
+    T_rows = []
+    for l in range(n - 1):
+        a = label_to_vertex[l]
+        b = label_to_vertex[l + 1]
+        T_rows.append(set(tree_path_edges(a, b)))
+
+    tree_edge_ids = [eid for eid in parent_edge if eid != -1]
+
+    return T_rows, P, label_to_vertex, tree_edge_ids
