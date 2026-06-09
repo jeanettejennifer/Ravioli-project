@@ -9,6 +9,122 @@ import math
 import matplotlib.pyplot as plt
 
 
+# def deform_code_for_logical(H, basis, logical):
+#     logical_qubits_index = np.where(logical == 1)[0]
+#     n_data = logical.shape[0]
+#     qubit_to_vertex = {int(q): i for i, q in enumerate(logical_qubits_index)}
+#     vertex_to_qubit = {i: int(q) for i, q in enumerate(logical_qubits_index)}
+#     n_vertices = len(logical_qubits_index)
+#     g = ig.Graph(n_vertices, edges=[])
+
+#     if basis == Pauli.Z:
+#         H_basis_all = H[:, n_data:]
+#         H_opposite_basis_all = H[:, :n_data]
+#     else:
+#         H_basis_all = H[:, :n_data]
+#         H_opposite_basis_all = H[:, n_data:]
+
+#     edge_set = set()
+    
+#     for check in H_opposite_basis_all:
+#         overlap = np.where((logical == 1) & (check == 1))[0]
+#         if len(overlap)>0 and len(overlap)%2==0:
+#             n_pairs = len(overlap) // 2
+#             for i in range(n_pairs):
+#                 v1 = qubit_to_vertex[int(overlap[2*i])]
+#                 v2 = qubit_to_vertex[int(overlap[2*i+1])]
+#                 edge_set.add(normalize_edge(v1, v2))
+
+#     if edge_set:
+#         g.add_edges(list(edge_set))
+
+
+#     comps = g.components()
+#     if len(comps) > 1:
+#         reps = [comp[0] for comp in comps]
+#         for i in range(len(reps) - 1):
+#             e = normalize_edge(reps[i], reps[i + 1])
+#             if not g.are_adjacent(*e):
+#                 g.add_edge(*e)
+#     #print_degree_stats(g, "after adding edges")
+
+#     H_basis_nonzero = H_basis_all[np.any(H_basis_all, axis=1)]
+#     max_cycle_weight = int(np.max(np.sum(H_basis_nonzero, axis=1))) if len(H_basis_nonzero) else 4
+#     max_cycle_weight = max(max_cycle_weight, 3)
+
+#     cycles_edges = find_short_cycle_basis(
+#         [tuple(map(int, e)) for e in g.get_edgelist()],
+#         return_edges=True,
+#     )
+#     #print_degree_stats(g, "Before splitting cycles")
+#     cycles_edges = split_heavy_cycles(
+#         cycles_edges=cycles_edges,
+#         max_cycle_weight=max_cycle_weight,
+#         g=g,
+#     )
+#     #print_degree_stats(g, "After splitting cycles")
+#     final_edgelist = [normalize_edge(*e) for e in g.get_edgelist()]
+#     edge_to_eid = {e: eid for eid, e in enumerate(final_edgelist)}
+
+#     n_edges = len(final_edgelist)
+#     n_qubits = n_data + n_edges
+
+#     H_opposite_basis_new = np.zeros((len(cycles_edges), n_qubits), dtype=np.uint8)
+#     for i, cyc in enumerate(cycles_edges):
+#         for e in cyc:
+#             eid = edge_to_eid[normalize_edge(*e)]
+#             H_opposite_basis_new[i, n_data + eid] ^= 1
+
+#     H_basis_new = np.zeros((n_vertices, n_qubits), dtype=np.uint8)
+#     for v in range(n_vertices):
+#         H_basis_new[v, vertex_to_qubit[v]] = 1
+#         for eid in g.incident(v):
+#             H_basis_new[v, n_data + eid] ^= 1
+
+#     H_basis_old = H_basis_all[np.any(H_basis_all, axis=1)]
+#     H_basis_old_padded = np.pad(H_basis_old, ((0, 0), (0, n_edges)), mode="constant").astype(np.uint8)
+
+#     H_opposite_basis_old_padded = deform_old_opposite_basis_checks_with_graph_edges(
+#         g=g,
+#         H_opposite_basis_all=H_opposite_basis_all,
+#         logical_qubits=logical,
+#         logical_qubits_index=logical_qubits_index,
+#         n_data=n_data,
+#     )
+
+#     H_opposite_basis_def = np.vstack([H_opposite_basis_old_padded, H_opposite_basis_new]) % 2
+#     H_basis_def = np.vstack([H_basis_old_padded, H_basis_new]) % 2
+
+#     res = {
+#         "n_qubits" : n_qubits,
+#         "n_original_qubits" : n_data,
+#         "n_edges" : n_edges,
+#         "H_basis_def" : H_basis_def,
+#         "H_opposite_basis_def" : H_opposite_basis_def,
+#         "H_basis_new" : H_basis_new,
+#         "H_basis_old" : H_basis_old_padded,
+#         "H_opposite_basis_new" : H_opposite_basis_new,
+#         "H_opposite_basis_old_padded" : H_opposite_basis_old_padded,
+#         "g" : g,
+#         "logical" : logical,
+#         "qubit_to_vertex": qubit_to_vertex
+#     }
+    
+#     return res
+
+import graph_helper_functions
+from graph_helper_functions import *
+import matplotlib.pyplot as plt
+import matplotlib.patches as mpatches
+import igraph as ig
+from sympy.abc import x, y
+from qldpc import codes, circuits
+from qldpc.objects import Pauli
+import numpy as np
+from collections import defaultdict, deque
+from collections import defaultdict
+
+
 def deform_code_for_logical(H, basis, logical):
     logical_qubits_index = np.where(logical == 1)[0]
     n_data = logical.shape[0]
@@ -48,10 +164,11 @@ def deform_code_for_logical(H, basis, logical):
                 g.add_edge(*e)
     #print_degree_stats(g, "after adding edges")
 
-    H_basis_nonzero = H_basis_all[np.any(H_basis_all, axis=1)]
-    max_cycle_weight = int(np.max(np.sum(H_basis_nonzero, axis=1))) if len(H_basis_nonzero) else 4
+    row_weights = np.sum(np.array(H_basis_all), axis=1)
+    max_cycle_weight = int(np.max(row_weights)) if H_basis_all.shape[0] else 4
     max_cycle_weight = max(max_cycle_weight, 3)
 
+    #print(max_cycle_weight)
     cycles_edges = find_short_cycle_basis(
         [tuple(map(int, e)) for e in g.get_edgelist()],
         return_edges=True,
@@ -112,6 +229,182 @@ def deform_code_for_logical(H, basis, logical):
     
     return res
 
+def auxiliary_merge(deformation_result1, deformation_result2):
+    g1 = deformation_result1["g"]
+    g2 = deformation_result2["g"]
+    
+    n_v1 = g1.vcount()
+    n_v2 = g2.vcount()
+
+    n_q1 = deformation_result1["n_qubits"]
+    n_q2 = deformation_result2["n_qubits"]
+
+    n_data1 =  deformation_result1["n_original_qubits"]
+    n_data2 =  deformation_result2["n_original_qubits"]
+
+    n_edges1 = deformation_result1["n_edges"]
+    n_edges2 = deformation_result2["n_edges"]
+
+    if n_v1 != n_v2:
+        raise ValueError("This version requires equal-size ports.")
+    n_adapter_edges = n_v1
+
+    n_total_qubits = n_q1 + n_q2 + n_adapter_edges
+
+    T_rows1, P1, label_to_vertex1, tree_edges1 = skiptree(g1)
+    T_rows2, P2, label_to_vertex2, tree_edges2 = skiptree(g2)
+    
+    offset_data1 = 0
+    offset_edge1 = n_data1
+    offset_data2 = n_q1
+    offset_edge2 = n_q1 + n_data2
+    offset_adapter = n_q1 + n_q2
+
+    # qubit indexing:
+    # CODE QUBITS 1 | EDGE QUBITS 1 | CODE QUBITS 2 | EDGE QUBITS 2 | ADAPTER QUBITS
+
+    def left_edge_qubit(eid):
+        return offset_edge1 + eid
+
+    def right_edge_qubit(eid):
+        return offset_edge2 + eid
+
+    def adapter_edge_qubit(aid):
+        return offset_adapter + aid
+
+    g_combined = g1.disjoint_union(g2)
+    adapter_edges = []
+
+    for label in range(n_adapter_edges):
+        v1 = label_to_vertex1[label]
+        v2 = label_to_vertex2[label] + n_v1
+        adapter_edges.append((v1, v2))
+
+    g_combined.add_edges(adapter_edges)
+    
+    # repetition code matrix
+    HR = np.zeros((n_adapter_edges-1, n_adapter_edges), dtype=int)
+    for i in range(n_adapter_edges-1):
+        HR[i, i] = 1
+        HR[i, i+1] = 1
+
+    # new cycle checks
+    new_cycles = []
+    for i in range(n_adapter_edges-1):
+        # convert edge ids
+        cycle = np.zeros(n_total_qubits, dtype=np.uint8)
+        for edge_id in T_rows1[i]:
+            qubit_index = left_edge_qubit(edge_id)
+            cycle[qubit_index] = 1
+        for edge_id in np.where(HR[i]==1)[0]:
+            qubit_index = adapter_edge_qubit(edge_id)
+            cycle[qubit_index] = 1
+        for edge_id in T_rows2[i]:
+            qubit_index = right_edge_qubit(edge_id)
+            cycle[qubit_index] = 1
+        new_cycles.append(cycle)
+
+    new_cycles = np.asarray(new_cycles)
+
+    # update vertex checks
+    vertex_checks_updated = []
+    logical1 = deformation_result1["logical"]
+    logical2 = deformation_result2["logical"]
+
+    logical_support_index1 = np.where(logical1 == 1)[0]
+    logical_support_index2 = np.where(logical2 == 1)[0]
+    
+    # updated vertex checks 
+    
+    qubit_to_vertex1 = deformation_result1["qubit_to_vertex"]
+    qubit_to_vertex2 = deformation_result2["qubit_to_vertex"]
+
+    # helper for indexing qubits from combined graph edge ids
+    def combined_edge_to_qubit(eid):
+        if eid < n_edges1:
+            return left_edge_qubit(eid)
+        elif eid < n_edges1 + n_edges2:
+            return right_edge_qubit(eid - n_edges1)
+        else:
+            return adapter_edge_qubit(eid - n_edges1 - n_edges2)
+
+    for qubit_ind in logical_support_index1:
+        v = qubit_to_vertex1[qubit_ind]
+        eids = g_combined.incident(v)
+        new_check = np.zeros(n_total_qubits, dtype=np.uint8)
+        new_check[qubit_ind] = 1
+        for eid in eids:
+            edge_qubit_index = combined_edge_to_qubit(eid)
+            new_check[edge_qubit_index] = 1
+        vertex_checks_updated.append(new_check)
+
+    for qubit_ind in logical_support_index2:
+        v = qubit_to_vertex2[qubit_ind] + n_v1
+        eids = g_combined.incident(v)
+        new_check = np.zeros(n_total_qubits, dtype=np.uint8)
+        new_check[offset_data2 + qubit_ind] = 1
+        for eid in eids:
+            edge_qubit_index = combined_edge_to_qubit(eid)
+            new_check[edge_qubit_index] = 1
+
+        vertex_checks_updated.append(new_check)
+    
+    
+    def pad_matrix(M, total_cols, offset):
+        M = np.asarray(M, dtype=np.uint8)
+        out = np.zeros((M.shape[0], total_cols), dtype=np.uint8)
+        out[:, offset : offset + M.shape[1]] = M
+        return out
+    # pad old cycle checks
+
+    cycle_checks1_padded = pad_matrix(
+    deformation_result1["H_opposite_basis_new"],
+    n_total_qubits,
+    offset_data1)
+
+    cycle_checks2_padded = pad_matrix(
+        deformation_result2["H_opposite_basis_new"],
+        n_total_qubits,
+        offset_data2)
+
+    H_basis_old1_padded = pad_matrix(
+        deformation_result1["H_basis_old"],
+        n_total_qubits,
+        offset_data1)
+
+    H_basis_old2_padded = pad_matrix(
+        deformation_result2["H_basis_old"],
+        n_total_qubits,
+        offset_data2)
+
+    H_opposite_basis_old1_padded = pad_matrix(
+        deformation_result1["H_opposite_basis_old_padded"],
+        n_total_qubits,
+        offset_data1)
+
+    H_opposite_basis_old2_padded = pad_matrix(
+        deformation_result2["H_opposite_basis_old_padded"],
+        n_total_qubits,
+        offset_data2)
+    
+    cycle_checks = np.vstack([cycle_checks1_padded, cycle_checks2_padded, new_cycles]) 
+    vertex_checks = np.asarray(vertex_checks_updated)
+
+    H_basis = np.vstack([H_basis_old1_padded, H_basis_old2_padded, vertex_checks]) 
+    H_opposite_basis = np.vstack([H_opposite_basis_old1_padded, H_opposite_basis_old2_padded, cycle_checks])
+    
+    res = {
+        "n_total_qubits" : n_total_qubits,
+        "n_data1" : n_data1,
+        "n_data2" : n_data2,
+        "n_edges1" : n_edges1,
+        "n_edges2" : n_edges2,
+        "n_edge_qubits_total" : n_edges1 + n_edges2 + n_adapter_edges,
+        "n_adapter_edges" : n_adapter_edges,
+        "H_opposite_basis" : H_opposite_basis,
+        "H_basis" : H_basis
+    }
+    return res
 
 
 def deform_old_x_checks_with_graph_edges(
@@ -403,25 +696,34 @@ def print_degree_stats(g, label):
         hist[d] += 1
     print(f"{label}: degree histogram = {dict(sorted(hist.items()))}")
 
-def split_heavy_cycles(cycles_edges, max_cycle_weight, g):
+def split_heavy_cycles(
+    cycles_edges,
+    max_cycle_weight,
+    g,
+    target_max_vertex_degree=None,
+    degree_slack=0,
+):
     """
-    Split cycles until every cycle has <= max_cycle_weight edges.
+    Split cycles so each final cycle has <= max_cycle_weight edges.
 
-    Strategy:
-      - Ignore balance.
-      - At each step, choose the chord whose endpoints have the smallest
-        post-split vertex-degree cost.
-      - Keep splitting recursively until all child cycles are short enough.
+    Priority:
+      1. Use the fewest final pieces possible.
+      2. Make child cycles as balanced as possible.
+      3. Prefer chord endpoints with lower post-split degree.
+      4. Prefer existing chords when available.
 
+    Notes:
+      - Cycle weight counts the chord edge.
+      - A k-cycle split by one chord produces children whose weights sum to k + 2.
     """
 
     from collections import defaultdict
+    import math
+
+    if max_cycle_weight < 3:
+        raise ValueError("max_cycle_weight must be at least 3")
 
     def cycle_vertices_from_edges(cyc):
-        """
-        Recover an ordered vertex cycle from an unordered simple cycle edge list.
-        Returns [v0, v1, ..., v_{k-1}] with wraparound implicit.
-        """
         if not cyc:
             return []
 
@@ -434,7 +736,9 @@ def split_heavy_cycles(cycles_edges, max_cycle_weight, g):
 
         bad = [v for v, nbrs in adj.items() if len(nbrs) != 2]
         if bad:
-            raise ValueError(f"Edge set is not a simple cycle. Bad vertices: {bad}, cycle: {cyc}")
+            raise ValueError(
+                f"Edge set is not a simple cycle. Bad vertices: {bad}, cycle: {cyc}"
+            )
 
         start = cyc[0][0]
         ordered = [start]
@@ -443,10 +747,7 @@ def split_heavy_cycles(cycles_edges, max_cycle_weight, g):
 
         while True:
             nbrs = adj[curr]
-            if prev is None:
-                nxt = nbrs[0]
-            else:
-                nxt = nbrs[0] if nbrs[1] == prev else nbrs[1]
+            nxt = nbrs[0] if prev is None else (nbrs[0] if nbrs[1] == prev else nbrs[1])
 
             if nxt == start:
                 break
@@ -459,11 +760,22 @@ def split_heavy_cycles(cycles_edges, max_cycle_weight, g):
 
         return ordered
 
-    def choose_min_degree_chord(cyc, g):
+    def min_final_pieces(k):
         """
-        Choose a chord that minimizes endpoint degree growth, subject to actually
-        splitting the cycle into two strictly smaller cycles.
+        Lower bound for decomposing a k-cycle into cycles of size <= W
+        using noncrossing chords.
+
+        If p final cycles are produced, total final cycle weight is:
+            k + 2 * (p - 1)
+        so we need:
+            k + 2 * (p - 1) <= p * W
+            p >= (k - 2) / (W - 2)
         """
+        if k <= max_cycle_weight:
+            return 1
+        return int(math.ceil((k - 2) / (max_cycle_weight - 2)))
+
+    def choose_balanced_chord(cyc):
         verts = cycle_vertices_from_edges(cyc)
         k = len(verts)
 
@@ -475,7 +787,6 @@ def split_heavy_cycles(cycles_edges, max_cycle_weight, g):
 
         for i in range(k):
             for j in range(i + 2, k):
-                # skip wraparound adjacency
                 if i == 0 and j == k - 1:
                     continue
 
@@ -486,25 +797,46 @@ def split_heavy_cycles(cycles_edges, max_cycle_weight, g):
                 arc1_len = j - i
                 arc2_len = k - arc1_len
 
-                # resulting cycles include the chord
                 c1_len = arc1_len + 1
                 c2_len = arc2_len + 1
 
-                # both children must be strictly smaller
                 if c1_len >= k or c2_len >= k:
                     continue
 
-                adds_new_edge = not g.are_adjacent(*chord)
-                deg_a_after = g.degree(a) + (1 if adds_new_edge else 0)
-                deg_b_after = g.degree(b) + (1 if adds_new_edge else 0)
+                p1 = min_final_pieces(c1_len)
+                p2 = min_final_pieces(c2_len)
+                total_pieces = p1 + p2
 
-                # purely degree-driven score
+                # Balance expected final pieces, not only immediate child lengths.
+                avg1 = c1_len / p1
+                avg2 = c2_len / p2
+                final_balance_cost = abs(avg1 - avg2)
+
+                immediate_balance_cost = abs(c1_len - c2_len)
+
+                adds_new_edge = not g.are_adjacent(*chord)
+                deg_a_after = g.degree(a) + int(adds_new_edge)
+                deg_b_after = g.degree(b) + int(adds_new_edge)
+
+                max_endpoint_degree = max(deg_a_after, deg_b_after)
+                sum_endpoint_degree = deg_a_after + deg_b_after
+
+                if target_max_vertex_degree is None:
+                    degree_overflow = 0
+                else:
+                    cap = target_max_vertex_degree + degree_slack
+                    degree_overflow = max(0, deg_a_after - cap) + max(0, deg_b_after - cap)
+
                 score = (
-                    max(deg_a_after, deg_b_after),   # minimize worst endpoint degree
-                    deg_a_after + deg_b_after,       # then total endpoint degree
-                    0 if adds_new_edge else -1,      # slight preference for existing chord
-                    c1_len + c2_len,                 # tie-breaker
-                    i, j,
+                    degree_overflow,          # first: respect degree cap if provided
+                    total_pieces,             # then: fewest final cycles
+                    final_balance_cost,       # then: balanced recursive decomposition
+                    immediate_balance_cost,   # then: balanced immediate split
+                    max_endpoint_degree,      # then: avoid high-degree endpoints
+                    sum_endpoint_degree,
+                    int(adds_new_edge),       # prefer existing chord
+                    i,
+                    j,
                 )
 
                 if best_score is None or score < best_score:
@@ -516,13 +848,9 @@ def split_heavy_cycles(cycles_edges, max_cycle_weight, g):
 
         return best
 
-    def split_once(cyc, g):
-        """
-        Split one cycle using the minimum-degree chord.
-        Returns two child cycles.
-        """
+    def split_once(cyc):
         verts = cycle_vertices_from_edges(cyc)
-        i, j, chord = choose_min_degree_chord(cyc, g)
+        i, j, chord = choose_balanced_chord(cyc)
 
         if not g.are_adjacent(*chord):
             g.add_edge(*chord)
@@ -530,15 +858,17 @@ def split_heavy_cycles(cycles_edges, max_cycle_weight, g):
         arc1 = verts[i:j + 1]
         arc2 = verts[j:] + verts[:i + 1]
 
-        c1 = [normalize_edge(arc1[t], arc1[t + 1]) for t in range(len(arc1) - 1)] + [chord]
-        c2 = [normalize_edge(arc2[t], arc2[t + 1]) for t in range(len(arc2) - 1)] + [chord]
+        c1 = [normalize_edge(arc1[t], arc1[t + 1]) for t in range(len(arc1) - 1)]
+        c1.append(chord)
+
+        c2 = [normalize_edge(arc2[t], arc2[t + 1]) for t in range(len(arc2) - 1)]
+        c2.append(chord)
 
         return c1, c2
 
     pending = [[normalize_edge(*e) for e in cyc] for cyc in cycles_edges]
     final_cycles = []
 
-    # safety cap
     max_splits = 50 * max(1, len(cycles_edges))
     split_count = 0
 
@@ -550,17 +880,15 @@ def split_heavy_cycles(cycles_edges, max_cycle_weight, g):
             continue
 
         if split_count >= max_splits:
-            # stop gracefully if something pathological happens
             final_cycles.append(cyc)
             continue
 
         try:
-            c1, c2 = split_once(cyc, g)
+            c1, c2 = split_once(cyc)
         except ValueError:
             final_cycles.append(cyc)
             continue
 
-        # Only accept the split if both children are strictly smaller
         if len(c1) < len(cyc) and len(c2) < len(cyc):
             pending.append(c1)
             pending.append(c2)
@@ -569,7 +897,6 @@ def split_heavy_cycles(cycles_edges, max_cycle_weight, g):
             final_cycles.append(cyc)
 
     return final_cycles
-
 
 from collections import deque
 import numpy as np

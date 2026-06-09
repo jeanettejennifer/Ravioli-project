@@ -1,0 +1,376 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <title>BB Tanner Graph with Logical Gadgets</title>
+
+  <style>
+    body { margin: 0; overflow: hidden; background: #050510; font-family: monospace; }
+    #graph { width: 100vw; height: 100vh; }
+
+    #info, #legend, #controls {
+      position: fixed;
+      left: 10px;
+      color: white;
+      z-index: 10;
+      background: rgba(0,0,0,0.70);
+      padding: 10px;
+      border-radius: 6px;
+      line-height: 1.5;
+      box-sizing: border-box;
+    }
+
+    #info { top: 10px; max-width: 360px; }
+    #legend { top: 106px; }
+
+    #controls {
+      top: 326px;
+      width: 270px;
+      max-height: calc(100vh - 345px);
+      overflow-y: auto;
+    }
+
+    button {
+      font-family: monospace;
+      margin: 3px;
+      padding: 5px 8px;
+      border-radius: 4px;
+      border: 1px solid #888;
+      background: #222;
+      color: white;
+      cursor: pointer;
+    }
+
+    button:hover { background: #444; }
+    button.active { background: #cc2222; border-color: #ff7777; }
+
+    .control-title {
+      margin-top: 10px;
+      margin-bottom: 4px;
+      font-weight: bold;
+    }
+
+    .dot {
+      display: inline-block;
+      width: 12px;
+      height: 12px;
+      border-radius: 50%;
+      margin-right: 8px;
+    }
+
+    .l-data { background: #2f7ed8; }
+    .r-data { background: #ffd21f; }
+    .x-check { background: #ff5aa5; }
+    .z-check { background: #3cb371; }
+    .edge { background: #ff8c00; }
+    .orig { background: #bbbbbb; }
+    .box { background: #ffffff; }
+    .support { background: #42d9ff; }
+  </style>
+</head>
+
+<body>
+
+<div id="info">
+  BB Tanner Graph<br>
+  BB links and gadget rectangles always visible<br>
+  click a logical to show its gadget graph and support links
+</div>
+
+<div id="legend">
+  <div><span class="dot l-data"></span> L data qubit</div>
+  <div><span class="dot r-data"></span> R data qubit</div>
+  <div><span class="dot x-check"></span> X check</div>
+  <div><span class="dot z-check"></span> Z check</div>
+  <div><span class="dot edge"></span> gadget edge qubit</div>
+  <div><span class="dot orig"></span> copied support qubit</div>
+  <div><span class="dot box"></span> gadget rectangle</div>
+  <div><span class="dot support"></span> selected support link</div>
+</div>
+
+<div id="controls">
+  <button id="hide-all-gadgets">hide all gadget links</button>
+
+  <div class="control-title">Z logical gadgets</div>
+  <div id="z-buttons"></div>
+
+  <div class="control-title">X logical gadgets</div>
+  <div id="x-buttons"></div>
+</div>
+
+<div id="graph"></div>
+
+<script src="https://unpkg.com/3d-force-graph"></script>
+
+<script>
+fetch("./bb_tanner_graph.json")
+  .then(response => {
+    if (!response.ok) throw new Error("Could not load bb_tanner_graph.json");
+    return response.json();
+  })
+  .then(graphData => {
+
+    graphData.nodes.forEach(node => {
+      node.x = Number(node.x ?? 0);
+      node.y = Number(node.y ?? 0);
+      node.z = Number(node.z ?? 0);
+
+      node.fx = Number(node.fx ?? node.x);
+      node.fy = Number(node.fy ?? node.y);
+      node.fz = Number(node.fz ?? node.z);
+    });
+
+    const allNodes = graphData.nodes;
+    const allLinks = graphData.links;
+    const activeGadgets = new Set();
+
+    function isLogicalRegister(register) {
+      return typeof register === "string" &&
+        (register.startsWith("DZ") || register.startsWith("DX"));
+    }
+
+    function isGadgetNode(node) {
+      return (
+        node.kind === "edge" ||
+        node.kind === "gadget_original" ||
+        node.kind === "gadget_box_corner" ||
+        (node.kind === "check" && isLogicalRegister(node.register))
+      );
+    }
+
+    function allGadgetRegisters() {
+      const regs = new Set();
+
+      allNodes.forEach(node => {
+        if (isGadgetNode(node) && isLogicalRegister(node.register)) {
+          regs.add(node.register);
+        }
+      });
+
+      return [...regs].sort((a, b) => {
+        const ak = a.slice(0, 2);
+        const bk = b.slice(0, 2);
+        const an = Number(a.replace(/\D/g, ""));
+        const bn = Number(b.replace(/\D/g, ""));
+
+        if (ak !== bk) return bk.localeCompare(ak);
+        if (an !== bn) return an - bn;
+        return a.localeCompare(b);
+      });
+    }
+
+    function linkIsVisible(link) {
+      if (link.kind === "tanner_edge") return true;
+      if (link.kind === "gadget_box_edge") return true;
+      if (link.kind === "gadget_tanner_edge") return activeGadgets.has(link.register);
+      if (link.kind === "gadget_support_edge") return activeGadgets.has(link.register);
+      return false;
+    }
+
+    function displayLinks() {
+      return allLinks.filter(link => {
+        if (link.kind === "gadget_support_edge") {
+          return activeGadgets.has(link.register);
+        }
+        return true;
+      });
+    }
+
+    function linkForceStrength(link) {
+      if (!linkIsVisible(link)) return 0;
+      if (link.kind === "tanner_edge") return 0.001;
+      if (link.kind === "gadget_box_edge") return 0.001;
+      if (link.kind === "gadget_tanner_edge") return 0.02;
+      if (link.kind === "gadget_support_edge") return 0.01;
+      return 0;
+    }
+
+    function updateLinkForce() {
+      const linkForce = Graph.d3Force("link");
+      if (linkForce) {
+        linkForce
+          .strength(linkForceStrength)
+          .distance(link => link.kind === "gadget_support_edge" ? 120 : 28);
+      }
+    }
+
+    function nodeColor(node) {
+      if (node.kind === "gadget_box_corner") return "#ffffff";
+      if (node.kind === "edge") return "#ff8c00";
+      if (node.kind === "gadget_original") return "#bbbbbb";
+
+      if (node.kind === "data" && node.register === "L") return "#2f7ed8";
+      if (node.kind === "data" && node.register === "R") return "#ffd21f";
+
+      if (node.kind === "check" && node.check_type === "X") return "#ff5aa5";
+      if (node.kind === "check" && node.check_type === "Z") return "#3cb371";
+
+      return "#ffffff";
+    }
+
+    function nodeSize(node) {
+      if (node.kind === "gadget_box_corner") return 0.8;
+      if (node.kind === "edge") return 2.8;
+      if (node.kind === "gadget_original") return 2.3;
+      if (node.kind === "check" && isLogicalRegister(node.register)) return 2.8;
+      if (node.kind === "check") return 4.5;
+      if (node.kind === "data") return 4.5;
+      return 2;
+    }
+
+    function linkOpacity(link) {
+      if (!linkIsVisible(link)) return 0;
+      if (link.kind === "tanner_edge") return 0.18;
+      if (link.kind === "gadget_tanner_edge") return 0.9;
+      if (link.kind === "gadget_support_edge") return 0.85;
+      if (link.kind === "gadget_box_edge") return 0.95;
+      return 0;
+    }
+
+    function linkWidth(link) {
+      if (!linkIsVisible(link)) return 0;
+      if (link.kind === "tanner_edge") return 0.35;
+      if (link.kind === "gadget_tanner_edge") return 1.2;
+      if (link.kind === "gadget_support_edge") return 1.4;
+      if (link.kind === "gadget_box_edge") return 2.5;
+      return 0;
+    }
+
+    function linkColor(link) {
+      if (link.kind === "gadget_box_edge") return "#ffffff";
+      if (link.kind === "gadget_support_edge") return "#42d9ff";
+      if (link.check_type === "X") return "#ff9ccc";
+      if (link.check_type === "Z") return "#9cffc2";
+      return "#aaaaaa";
+    }
+
+    function nodeLabel(node) {
+      if (node.kind === "gadget_box_corner") return "";
+
+      if (node.kind === "data") {
+        return `${node.id}<br>${node.register} data<br>grid=(${node.u}, ${node.v})`;
+      }
+
+      if (node.kind === "edge") {
+        return `${node.id}<br>gadget edge qubit<br>${node.register}<br>basis ${node.basis}`;
+      }
+
+      if (node.kind === "gadget_original") {
+        return `${node.id}<br>copied q_${node.original_qubit}<br>${node.register}`;
+      }
+
+      if (node.kind === "check") {
+        return `${node.id}<br>${node.check_type} check<br>${node.register ?? ""}`;
+      }
+
+      return node.id;
+    }
+
+    const Graph = ForceGraph3D()(document.getElementById("graph"))
+      .graphData({
+        nodes: allNodes,
+        links: displayLinks()
+      })
+      .backgroundColor("#050510")
+
+      .nodePositionUpdate((obj, coords, node) => {
+        obj.position.set(node.fx, node.fy, node.fz);
+        return true;
+      })
+
+      .nodeColor(nodeColor)
+      .nodeVal(nodeSize)
+      .nodeLabel(nodeLabel)
+
+      .linkOpacity(linkOpacity)
+      .linkWidth(linkWidth)
+      .linkColor(linkColor);
+
+    function refreshButtons() {
+      document.querySelectorAll("#controls button[data-register]").forEach(button => {
+        button.classList.toggle("active", activeGadgets.has(button.dataset.register));
+      });
+    }
+
+    function refreshGraph() {
+      Graph.graphData({
+        nodes: allNodes,
+        links: displayLinks()
+      });
+
+      Graph.nodeColor(nodeColor);
+      Graph.nodeVal(nodeSize);
+      Graph.nodeLabel(nodeLabel);
+      Graph.linkOpacity(linkOpacity);
+      Graph.linkWidth(linkWidth);
+      Graph.linkColor(linkColor);
+      updateLinkForce();
+      Graph.d3ReheatSimulation();
+      Graph.refresh();
+      refreshButtons();
+    }
+
+    function addButtons() {
+      const zContainer = document.getElementById("z-buttons");
+      const xContainer = document.getElementById("x-buttons");
+
+      zContainer.innerHTML = "";
+      xContainer.innerHTML = "";
+
+      allGadgetRegisters().forEach(register => {
+        const button = document.createElement("button");
+        button.textContent = register;
+        button.dataset.register = register;
+
+        button.onclick = () => {
+          if (activeGadgets.has(register)) {
+            activeGadgets.delete(register);
+          } else {
+            activeGadgets.add(register);
+          }
+
+          refreshGraph();
+        };
+
+        if (register.startsWith("DZ")) {
+          zContainer.appendChild(button);
+        } else if (register.startsWith("DX")) {
+          xContainer.appendChild(button);
+        }
+      });
+    }
+
+    addButtons();
+
+    document.getElementById("hide-all-gadgets").onclick = () => {
+      activeGadgets.clear();
+      refreshGraph();
+    };
+
+    updateLinkForce();
+    Graph.d3Force("charge", null);
+    Graph.d3Force("center", null);
+    Graph.d3Force("collision", null);
+    Graph.cooldownTicks(1);
+
+    Graph.cameraPosition({
+      x: 0,
+      y: -1100,
+      z: 580
+    });
+
+    setTimeout(() => {
+      refreshGraph();
+      Graph.zoomToFit(800, 80);
+    }, 400);
+
+  })
+  .catch(err => {
+    console.error(err);
+    document.getElementById("info").innerHTML =
+      "Failed to load bb_tanner_graph.json<br>" + err.message;
+  });
+</script>
+
+</body>
+</html>
