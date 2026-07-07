@@ -712,9 +712,6 @@ def split_heavy_cycles(
       3. Prefer chord endpoints with lower post-split degree.
       4. Prefer existing chords when available.
 
-    Notes:
-      - Cycle weight counts the chord edge.
-      - A k-cycle split by one chord produces children whose weights sum to k + 2.
     """
 
     from collections import defaultdict
@@ -1005,13 +1002,17 @@ def deform_old_opposite_basis_checks_with_graph_edges(
 
     H_old = H_opposite_basis_all[np.any(H_opposite_basis_all, axis=1)]
     n_edges = g.ecount()
-    H_old_padded = np.pad(H_old, ((0, 0), (0, n_edges)), mode="constant").astype(np.uint8)
+    data_width = H_old.shape[1]
+    full_data_width = max(int(n_data), data_width)
+    H_old_padded = np.zeros((H_old.shape[0], full_data_width + n_edges), dtype=np.uint8)
+    H_old_padded[:, :data_width] = H_old
 
     qubit_to_vertex = {int(q): i for i, q in enumerate(logical_qubits_index)}
     edge_to_eid = {normalize_edge(*e): eid for eid, e in enumerate(g.get_edgelist())}
+    logical_support = logical_qubits[:data_width]
 
     for row_idx, check in enumerate(H_old):
-        overlap = np.where((logical_qubits == 1) & (check == 1))[0]
+        overlap = np.where((logical_support == 1) & (check == 1))[0]
 
         if len(overlap) == 0:
             continue
@@ -1026,7 +1027,14 @@ def deform_old_opposite_basis_checks_with_graph_edges(
 
         for e in matching_edges:
             eid = edge_to_eid[e]
-            H_old_padded[row_idx, n_data + eid] ^= 1
+            col = full_data_width + eid
+            if col >= H_old_padded.shape[1]:
+                raise IndexError(
+                    f"edge column {col} is outside old-check matrix with shape "
+                    f"{H_old_padded.shape}; n_data={n_data}, data_width={data_width}, "
+                    f"n_edges={n_edges}, eid={eid}"
+                )
+            H_old_padded[row_idx, col] ^= 1
 
     return H_old_padded
 
