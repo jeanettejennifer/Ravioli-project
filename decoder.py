@@ -22,7 +22,7 @@ class BPOSDSinterDecoder(sinter.Decoder):
     
 def bposd_decoder():
     custom_decoder = BPOSDSinterDecoder(
-            max_bp_iters=20,
+            max_bp_iters= 20,#20,
             bp_method="ms",
             schedule="serial",
             ms_scaling_factor=0.625,

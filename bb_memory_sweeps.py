@@ -1,4 +1,4 @@
-# BB code memory: code-capacity MPP stabilizer rounds + simple BPOSD decoder
+# BB code memory with simple BPOSD decoder
 from stimbposd import BPOSD
 import matplotlib.pyplot as plt
 from sympy.abc import x, y
@@ -51,36 +51,82 @@ def bb_prepare_logical_memory_state(BB_code, memory_basis=Pauli.Z):
     ).to_circuit()
 
 
-def bb_append_code_capacity_noise(circuit, n_data, p):
+def bb_append_data_depolarize_noise(circuit, n_data, p):
     if p:
         circuit.append("DEPOLARIZE1", list(range(n_data)), p)
-
-
-def bb_append_mpp_check(circuit, pauli, support):
-    targets = []
-    for q in np.flatnonzero(support):
-        if targets:
-            targets.append(stim.target_combiner())
-        targets.append(stim.target_x(int(q)) if pauli == "X" else stim.target_z(int(q)))
-    if not targets:
-        raise ValueError("Cannot measure an empty stabilizer row with MPP")
-    circuit.append("MPP", targets)
-
+        
 
 def bb_rec_abs(circuit, measurement_index):
     return stim.target_rec(int(measurement_index) - circuit.num_measurements)
 
-
-def bb_measure_stabilizer_round(circuit, Hx, Hz):
+def get_cnot_layers(H):
+    # cnot layers without conflict from H = Hz or H = Hx
+    H = np.asarray(H, dtype=np.uint8)
+    layers = []
+    used = []
+    for row, check in enumerate(H):
+        for q in np.flatnonzero(check):
+            q = int(q)
+            for layer, used_layer in zip(layers, used):
+                if row not in used_layer["rows"] and q not in used_layer["qubits"]:
+                    layer.append((row, q))
+                    used_layer["rows"].add(row)
+                    used_layer["qubits"].add(q)
+                    break
+            else:
+                layers.append([(row, q)])
+                used.append({"rows": {row}, "qubits": {q}})
+    return layers
+        
+def bb_measure_stabilizer_round(circuit, Hx, Hz, x_ancillas, z_ancillas, p_reset_flip, p_after_clifford_depolarize, p_measurement_flip):
     records = {"x": [], "z": []}
-    for row in Hx:
-        bb_append_mpp_check(circuit, "X", row)
+    x_ancillas = [int(q) for q in x_ancillas]
+    z_ancillas = [int(q) for q in z_ancillas]
+    
+    # reset ancillas
+    circuit.append("R", x_ancillas)
+    circuit.append("R", z_ancillas)
+    circuit.append(f"X_ERROR", x_ancillas, p_reset_flip)
+    circuit.append(f"X_ERROR", z_ancillas, p_reset_flip)
+
+    # basis change for X ancillas
+    circuit.append("h", x_ancillas)
+    circuit.append(f"DEPOLARIZE1", x_ancillas, p_after_clifford_depolarize)
+    # CX schedule (without ticks) for X checks
+    x_layers = get_cnot_layers(Hx)
+    z_layers = get_cnot_layers(Hz)
+
+    for layer in x_layers:
+        targets = []
+        for row, q in layer:
+            targets += [x_ancillas[row], q]
+        circuit.append("cx", targets)
+        circuit.append(f"DEPOLARIZE2", targets, p_after_clifford_depolarize)
+
+    # basis change for X ancillas 
+    circuit.append("h", x_ancillas)
+    circuit.append(f"DEPOLARIZE1", x_ancillas, p_after_clifford_depolarize)
+
+    # CX schedule for Z checks 
+    for layer in z_layers:
+        targets = []
+        for row, q in layer:
+            targets += [q, z_ancillas[row]]
+        circuit.append("cx", targets)
+        circuit.append(f"DEPOLARIZE2", targets, p_after_clifford_depolarize)
+
+    # measure X ancillas and keep track of record
+    for ancilla in x_ancillas:
+        circuit.append("X_ERROR", [ancilla], p_measurement_flip)
+        circuit.append("M", [ancilla])
         records["x"].append(circuit.num_measurements - 1)
-    for row in Hz:
-        bb_append_mpp_check(circuit, "Z", row)
+    
+    # measure Z ancillas
+    for ancilla in z_ancillas:
+        circuit.append("X_ERROR", [ancilla], p_measurement_flip)
+        circuit.append("M", [ancilla])
         records["z"].append(circuit.num_measurements - 1)
     return records
-
 
 def bb_add_round_detectors(circuit, previous, current):
     for kind in ["x", "z"]:
@@ -88,12 +134,17 @@ def bb_add_round_detectors(circuit, previous, current):
             circuit.append("DETECTOR", [bb_rec_abs(circuit, old), bb_rec_abs(circuit, new)])
 
 
-def bb_measure_data(circuit, n_data, memory_basis=Pauli.Z):
-    # No noise 
-    if bb_is_x_basis(memory_basis):
-        circuit.append("H", list(range(n_data)))
+def bb_measure_data(circuit, n_data, memory_basis=Pauli.Z, p_measurement_flip=0.0):
+    
     start = circuit.num_measurements
-    circuit.append("M", list(range(n_data)))
+    
+    if bb_is_x_basis(memory_basis):
+        circuit.append(f"Z_ERROR", list(range(n_data)), p_measurement_flip)
+        circuit.append("MX", list(range(n_data)))
+    else:
+        circuit.append(f"X_ERROR", list(range(n_data)), p_measurement_flip)
+        circuit.append("M", list(range(n_data)))
+
     return [start + q for q in range(n_data)]
 
 
@@ -122,8 +173,11 @@ def bb_add_initial_detectors(circuit, current):
         for m in current[kind]:
             circuit.append("DETECTOR", [bb_rec_abs(circuit, m)])
 
+def reset_qubits(circuit, qubits, p_reset_flip):
+    circuit.append("R", qubits)
+    circuit.append("Z_ERROR", qubits, p_reset_flip)
 
-def bb_memory_circuit(BB_code, memory_basis=Pauli.Z, rounds=12, p=0.0, logical_indices=None):
+def bb_memory_circuit(BB_code, memory_basis=Pauli.Z, noise_model="code-capacity", rounds=6, p=0.0, logical_indices=None):
     Hx, Hz = bb_get_PCMS(BB_code.matrix)
     n_data = Hx.shape[1]
 
@@ -131,10 +185,47 @@ def bb_memory_circuit(BB_code, memory_basis=Pauli.Z, rounds=12, p=0.0, logical_i
     circuit += bb_prepare_logical_memory_state(BB_code, memory_basis)
 
     previous = None
+
+    n_data = np.shape(Hx)[1]
+
+    n_x = np.shape(Hx)[0]
+    n_z = np.shape(Hz)[0]
+
+    x_ancillas = np.arange(n_data, n_data + n_x)
+    z_ancillas = np.arange(n_data + n_x, n_data + n_x + n_z)
+
+    if noise_model == "code-capacity":
+        p_reset_flip = p_after_clifford_depolarize = p_measurement_flip = 0.0
+        
+    else:
+        p_reset_flip = p_after_clifford_depolarize = p_measurement_flip = p
+
     for _ in range(rounds):
+
         # One memory interval per round, followed by one full syndrome extraction.
-        bb_append_code_capacity_noise(circuit, n_data, p)
-        current = bb_measure_stabilizer_round(circuit, Hx, Hz)
+        bb_append_data_depolarize_noise(circuit, n_data, p)
+
+        if noise_model == "code-capacity":
+            current = bb_measure_stabilizer_round(circuit = circuit, 
+                                                  Hx = Hx, 
+                                                  Hz = Hz, 
+                                                  x_ancillas = x_ancillas, 
+                                                  z_ancillas = z_ancillas, 
+                                                  p_after_clifford_depolarize=p_after_clifford_depolarize,
+                                                  p_measurement_flip=p_measurement_flip,
+                                                  p_reset_flip=p_reset_flip,
+                                                  )
+        else:
+            current = bb_measure_stabilizer_round(circuit = circuit, 
+                                                  Hx = Hx, 
+                                                  Hz = Hz, 
+                                                  x_ancillas = x_ancillas, 
+                                                  z_ancillas = z_ancillas, 
+                                                  p_after_clifford_depolarize=p,
+                                                  p_measurement_flip=p,
+                                                  p_reset_flip=p_reset_flip,
+                                                  )
+        
         if previous is None:
             # Perfect preparation makes the first noiseless syndrome deterministic.
             bb_add_initial_detectors(circuit, current)
@@ -144,35 +235,20 @@ def bb_memory_circuit(BB_code, memory_basis=Pauli.Z, rounds=12, p=0.0, logical_i
         circuit.append("TICK")
 
     # No extra data noise here: final readout immediately closes the last syndrome.
-    data_records = bb_measure_data(circuit, n_data, memory_basis=memory_basis)
+    if noise_model == "code-capacity":
+        data_records = bb_measure_data(circuit, n_data, memory_basis=memory_basis, p_measurement_flip=0.0)
+    else:
+        data_records = bb_measure_data(circuit, n_data, memory_basis=memory_basis, p_measurement_flip=p)
+
     bb_add_final_detectors(circuit, Hx, Hz, previous, data_records, memory_basis=memory_basis)
     bb_add_memory_observables(circuit, BB_code, memory_basis, data_records, logical_indices=logical_indices)
     return circuit
 
 
-class _BPOSDSinterCompiledDecoder(sinter.CompiledDecoder):
-    def __init__(self, dem, **kwargs):
-        self.decoder = BPOSD(dem, **kwargs)
-
-    def decode_shots_bit_packed(self, *, bit_packed_detection_event_data):
-        return self.decoder.decode_batch(
-            bit_packed_detection_event_data,
-            bit_packed_shots=True,
-            bit_packed_predictions=True,
-        )
-
-
-class BPOSDSinterDecoder(sinter.Decoder):
-    def __init__(self, **kwargs):
-        self.kwargs = dict(kwargs)
-
-    def compile_decoder_for_dem(self, *, dem):
-        return _BPOSDSinterCompiledDecoder(dem, **self.kwargs)
-
-
 def bb_estimate_memory_error_rates(
     BB_code,
     memory_basis,
+    noise_model,
     p,
     rounds=12,
     shots=1000,
@@ -200,6 +276,7 @@ def bb_estimate_memory_error_rates(
             rounds=rounds,
             p=float(p),
             logical_indices=[logical_i],
+            noise_model = noise_model,
         )
 
         dem = circuit.detector_error_model(
@@ -230,7 +307,7 @@ def bb_estimate_memory_error_rates(
             },
         ))
 
-    
+
     stats = sinter.collect(
         tasks=tasks,
         max_shots=int(shots),
@@ -262,6 +339,8 @@ def bb_run_memory_sweep(
     rounds=6,
     shots=1000,
     logical_indices=None,
+    num_workers = 1,
+    noise_model = "code-capacity"
 ):
 
     if ps is None:
@@ -281,11 +360,12 @@ def bb_run_memory_sweep(
         raw[:, j], decoded[:, j] = bb_estimate_memory_error_rates(
             BB_code,
             memory_basis=memory_basis,
+            noise_model = noise_model,
             p=float(p),
             rounds=rounds,
             shots=shots,
             logical_indices=logical_indices,
-            num_workers=1
+            num_workers=num_workers
         )
         print(
             f"BB memory {basis_name}, p={p:.2e}, "
@@ -302,9 +382,3 @@ def bb_run_memory_sweep(
         "decoded": decoded,
         "code_label": bb_code_label(BB_code),
     }
-
-
-
-
-
-# for the logical + gadget
