@@ -4,17 +4,14 @@ import matplotlib.pyplot as plt
 from sympy.abc import x, y
 from qldpc import codes
 from qldpc.objects import Pauli
-from graph_helper_functions import deform_code_for_logical
 import numpy as np
 import stim
-import importlib
-import deform_triangular_lattice
-importlib.reload(deform_triangular_lattice)
-from deform_triangular_lattice import deform_logical_to_tri_lattice
 import stim
 import sinter
 import matplotlib.pyplot as plt
-from decoder import bposd_decoder
+from deformation.deform import deform_code_for_logical
+from deformation.deform_triangular import deform_logical_to_tri_lattice
+from circuits.decoder import bposd_decoder
 
 def bb_get_PCMS(H):
     H = np.asarray(H, dtype=np.uint8)
@@ -55,12 +52,11 @@ def bb_append_data_depolarize_noise(circuit, n_data, p):
     if p:
         circuit.append("DEPOLARIZE1", list(range(n_data)), p)
         
-
 def bb_rec_abs(circuit, measurement_index):
     return stim.target_rec(int(measurement_index) - circuit.num_measurements)
 
 def get_cnot_layers(H):
-    # cnot layers without conflict from H = Hz or H = Hx
+    # get cnot layers without conflict from H = Hz or H = Hx
     H = np.asarray(H, dtype=np.uint8)
     layers = []
     used = []
@@ -149,7 +145,7 @@ def bb_measure_data(circuit, n_data, memory_basis=Pauli.Z, p_measurement_flip=0.
 
 
 def bb_add_final_detectors(circuit, Hx, Hz, last_records, data_records, memory_basis=Pauli.Z):
-    # Only the stabilizer type matching the final data-measurement basis can be closed.
+    # Final detectors for stabilizer type matching the final data-measurement basis
     checks = Hx if bb_is_x_basis(memory_basis) else Hz
     kind = "x" if bb_is_x_basis(memory_basis) else "z"
     for i, row in enumerate(checks):
@@ -202,10 +198,8 @@ def bb_memory_circuit(BB_code, memory_basis=Pauli.Z, noise_model="code-capacity"
 
     for _ in range(rounds):
 
-        # One memory interval per round, followed by one full syndrome extraction.
-        bb_append_data_depolarize_noise(circuit, n_data, p)
-
         if noise_model == "code-capacity":
+            bb_append_data_depolarize_noise(circuit, n_data, p)
             current = bb_measure_stabilizer_round(circuit = circuit, 
                                                   Hx = Hx, 
                                                   Hz = Hz, 
@@ -225,17 +219,16 @@ def bb_memory_circuit(BB_code, memory_basis=Pauli.Z, noise_model="code-capacity"
                                                   p_measurement_flip=p,
                                                   p_reset_flip=p_reset_flip,
                                                   )
-        
         if previous is None:
-            # Perfect preparation makes the first noiseless syndrome deterministic.
+            # State preparation in [0> (|+>) makes first round stabilisers deterministic in the absence of noise
             bb_add_initial_detectors(circuit, current)
         else:
             bb_add_round_detectors(circuit, previous, current)
         previous = current
         circuit.append("TICK")
 
-    # No extra data noise here: final readout immediately closes the last syndrome.
     if noise_model == "code-capacity":
+        bb_append_data_depolarize_noise(circuit, n_data, p)
         data_records = bb_measure_data(circuit, n_data, memory_basis=memory_basis, p_measurement_flip=0.0)
     else:
         data_records = bb_measure_data(circuit, n_data, memory_basis=memory_basis, p_measurement_flip=p)
