@@ -501,13 +501,7 @@ def layout_path_congestion_score(path, participation):
 
 
 def layout_choose_old_bb_support(lattice_graph, terminals, participation, max_participation=7):
-    """Pair logical-overlap vertices and route each pair on the lattice.
-
-    The even support is matched into pairs. Each pair contributes one connected
-    shortest physical path. The union of different pair paths is allowed to be
-    disconnected; forcing all pairs into one component is not part of the adapter
-    construction.
-    """
+    """Pair logical-overlap vertices and route each pair on the lattice."""
     terminals = list(terminals)
     if len(terminals) % 2:
         raise ValueError("Old BB check has odd number of terminals")
